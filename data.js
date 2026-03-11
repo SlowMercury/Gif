@@ -70,7 +70,7 @@ const pages = [
     {
       id: 2,
       title: "Surprised Cat Returns",
-      gifUrl: "./gifs/giphy-2.gif",
+      gifUrl: "https://media2.giphy.com/media/v1.Y2lkPTc5MGI3NjExeXVmcGdzaXZpc2tvZTBiczY0Zm13NzV0NXIyd3dhMzdscHRoOXJoZSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/xT5LMOvzyqSyIGqlsk/giphy.gif",
       questions: [
         {
           question: "Describe the setting. Where is the cat?",

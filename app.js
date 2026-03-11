@@ -2,95 +2,264 @@
    APP.JS — GIF Description Practice (main application logic)
    ============================================================
    This file handles:
-     - Hash-based routing (#page/1, #page/2, #grid)
+     - Hash-based routing (#page/1, #page/2, #grid, #grid/2, …)
      - Rendering the current page (GIF, questions, answers)
-     - Navigation (next/prev buttons, keyboard arrows, pagination)
+     - GIF pause/play via canvas freeze
+     - Navigation (next/prev arrows, keyboard, pagination)
      - Answer reveal toggling (individual + show/hide all)
-     - Sidebar menu with search/filter
-     - Grid / gallery view with lazy loading
+     - Sidebar menu with search
+     - Grid / gallery view with lazy-loaded thumbnails
+     - Dark mode (localStorage + system preference)
+   ============================================================
+   CHANGELOG:
+     - Added: parseHash() replaces getPageIndexFromHash() to
+       support both #page/N and #grid/N routes.
+     - Added: route() as central dispatcher.
+     - Added: sidebar (open/close/search/highlight).
+     - Added: GIF pause/play via canvas (setupGifPausePlay).
+     - Added: numbered pagination with smart ellipsis.
+     - Added: grid/gallery view with IntersectionObserver lazy load.
+     - Added: gallery toggle button.
+     - Added: dark mode toggle with soft navy-slate palette.
+     - Removed: random page button.
    ============================================================ */
 
-// ---- DOM REFERENCES ----
+// ============================================================
+//  DOM REFERENCES
+// ============================================================
 
 const mainEl          = document.getElementById('main');
 const prevBtn         = document.getElementById('prevBtn');
 const nextBtn         = document.getElementById('nextBtn');
-const menuBtn         = document.getElementById('menuBtn');
-const sidebar         = document.getElementById('sidebar');
-const sidebarBackdrop = document.getElementById('sidebarBackdrop');
-const sidebarClose    = document.getElementById('sidebarClose');
-const sidebarSearch   = document.getElementById('sidebarSearch');
-const sidebarList     = document.getElementById('sidebarList');
 const galleryBtn      = document.getElementById('galleryBtn');
+const darkModeBtn     = document.getElementById('darkModeBtn');
+const hamburgerBtn    = document.getElementById('hamburgerBtn');
+const sidebarEl       = document.getElementById('sidebar');
+const sidebarBackdrop = document.getElementById('sidebarBackdrop');
+const sidebarCloseBtn = document.getElementById('sidebarCloseBtn');
+const sidebarSearch   = document.getElementById('sidebarSearch');
+const sidebarListEl   = document.getElementById('sidebarList');
 
-// ---- STATE ----
+// ============================================================
+//  STATE
+// ============================================================
 
-let currentPageIndex = 0;   // index in the `pages` array (0-based)
-let currentView      = 'page'; // 'page' or 'grid'
+let currentPageIndex = 0;   // which page from `pages` is shown (0-based)
+let currentView      = 'page';  // 'page' or 'grid'
+let currentGridPage  = 1;   // which "page" of the gallery grid
+let gifPaused        = false;
 let sidebarOpen      = false;
 
 // ============================================================
-//  ROUTING — read & write the URL hash
+//  CONSTANTS
+// ============================================================
+
+const GRID_PAGE_SIZE = 24;  // thumbnails per grid page
+
+// ============================================================
+//  ROUTING — parse and set the URL hash
 // ============================================================
 
 /**
- * Parse the hash into a route descriptor.
- * Supports:  #page/1  (1-based id)  |  #grid
- * Falls back to { view: 'page', index: 0 } for invalid hashes.
+ * Parse the current hash to determine what to display.
+ * Supported formats:
+ *   #page/3   → page view, page with id 3
+ *   #grid     → gallery view, first grid page
+ *   #grid/2   → gallery view, second grid page
+ *   (empty)   → defaults to first page
+ *
+ * Returns an object: { view, pageIndex, gridPage }
  */
 function parseHash() {
   const hash = window.location.hash;
 
-  if (hash === '#grid') {
-    return { view: 'grid' };
+  // Grid / gallery view
+  const gridMatch = hash.match(/^#grid(?:\/(\d+))?$/);
+  if (gridMatch) {
+    const gp = gridMatch[1] ? parseInt(gridMatch[1], 10) : 1;
+    return { view: 'grid', pageIndex: currentPageIndex, gridPage: Math.max(1, gp) };
   }
 
-  const match = hash.match(/^#page\/(\d+)$/);
-  if (match) {
-    const id    = parseInt(match[1], 10);
+  // Page view
+  const pageMatch = hash.match(/^#page\/(\d+)$/);
+  if (pageMatch) {
+    const id    = parseInt(pageMatch[1], 10);
     const index = pages.findIndex(p => p.id === id);
-    if (index !== -1) return { view: 'page', index: index };
+    return { view: 'page', pageIndex: index !== -1 ? index : 0, gridPage: currentGridPage };
   }
 
-  return { view: 'page', index: 0 };
+  // Default — first page
+  return { view: 'page', pageIndex: 0, gridPage: 1 };
 }
 
 /**
- * Update the URL hash without triggering a full page reload.
+ * Navigate to a specific page by its index in the pages array.
+ * Sets the hash, which triggers hashchange → route().
  */
-function setHash(value) {
-  window.location.hash = value;
+function navigateToPage(index) {
+  if (index >= 0 && index < pages.length) {
+    window.location.hash = `#page/${pages[index].id}`;
+  }
+}
+
+/**
+ * Navigate to a specific grid page.
+ * Sets the hash, which triggers hashchange → route().
+ */
+function navigateToGrid(gridPage) {
+  gridPage = gridPage || 1;
+  window.location.hash = gridPage <= 1 ? '#grid' : `#grid/${gridPage}`;
 }
 
 // ============================================================
-//  RENDERING — build the HTML for the current page
+//  CENTRAL ROUTER — called on every hash change
 // ============================================================
 
 /**
- * Render the full page view for `pages[index]`.
+ * Reads the hash, updates state, and renders the correct view.
+ * All navigation ultimately flows through here.
+ */
+function route() {
+  const parsed = parseHash();
+
+  if (parsed.view === 'grid') {
+    currentView     = 'grid';
+    currentGridPage = parsed.gridPage;
+
+    mainEl.classList.add('main--grid');
+    renderGrid(parsed.gridPage);
+    hideNavArrows();
+    galleryBtn.classList.add('active');
+  } else {
+    currentView      = 'page';
+    currentPageIndex = parsed.pageIndex;
+
+    mainEl.classList.remove('main--grid');
+    renderPage(parsed.pageIndex);
+    showNavArrows();
+    galleryBtn.classList.remove('active');
+  }
+
+  updateSidebarHighlight();
+}
+
+// ============================================================
+//  SIDEBAR
+// ============================================================
+
+function openSidebar() {
+  sidebarOpen = true;
+  sidebarEl.classList.add('open');
+  sidebarBackdrop.classList.add('visible');
+  document.body.classList.add('sidebar-open');
+  hamburgerBtn.setAttribute('aria-expanded', 'true');
+
+  // Focus the search input for quick typing
+  setTimeout(() => sidebarSearch.focus(), 100);
+
+  updateSidebarHighlight();
+}
+
+function closeSidebar() {
+  sidebarOpen = false;
+  sidebarEl.classList.remove('open');
+  sidebarBackdrop.classList.remove('visible');
+  document.body.classList.remove('sidebar-open');
+  hamburgerBtn.setAttribute('aria-expanded', 'false');
+}
+
+function toggleSidebar() {
+  sidebarOpen ? closeSidebar() : openSidebar();
+}
+
+/**
+ * Populate (or re-populate) the sidebar list.
+ * If `filter` is provided, only show matching pages.
+ */
+function populateSidebar(filter) {
+  filter = (filter || '').toLowerCase().trim();
+  sidebarListEl.innerHTML = '';
+
+  let matchCount = 0;
+
+  pages.forEach((page, index) => {
+    const searchText = `#${page.id} ${page.title}`.toLowerCase();
+    if (filter && !searchText.includes(filter)) return;
+
+    matchCount++;
+
+    const li = document.createElement('li');
+    li.className = 'sidebar-item';
+    li.dataset.index = index;
+    li.setAttribute('role', 'button');
+    li.setAttribute('tabindex', '0');
+
+    li.innerHTML =
+      '<span class="sidebar-item-number">#' + page.id + '</span>' +
+      '<span class="sidebar-item-title">' + escapeHTML(page.title) + '</span>';
+
+    // Click to navigate
+    li.addEventListener('click', () => {
+      navigateToPage(index);
+      closeSidebar();
+    });
+
+    // Enter key also navigates
+    li.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        navigateToPage(index);
+        closeSidebar();
+      }
+    });
+
+    sidebarListEl.appendChild(li);
+  });
+
+  // Show "no results" if search yields nothing
+  if (matchCount === 0 && filter) {
+    const empty = document.createElement('li');
+    empty.className = 'sidebar-no-results';
+    empty.textContent = 'No pages found.';
+    sidebarListEl.appendChild(empty);
+  }
+
+  updateSidebarHighlight();
+}
+
+/**
+ * Highlight the current page in the sidebar list.
+ */
+function updateSidebarHighlight() {
+  const items = sidebarListEl.querySelectorAll('.sidebar-item');
+  items.forEach(item => {
+    const idx = parseInt(item.dataset.index, 10);
+    const isActive = (currentView === 'page' && idx === currentPageIndex);
+    item.classList.toggle('active', isActive);
+  });
+}
+
+// Sidebar event listeners (set up once)
+hamburgerBtn.addEventListener('click', toggleSidebar);
+sidebarCloseBtn.addEventListener('click', closeSidebar);
+sidebarBackdrop.addEventListener('click', closeSidebar);
+
+sidebarSearch.addEventListener('input', () => {
+  populateSidebar(sidebarSearch.value);
+});
+
+// ============================================================
+//  PAGE RENDERING
+// ============================================================
+
+/**
+ * Render the full page view for pages[index].
  */
 function renderPage(index) {
   const page = pages[index];
   if (!page) return;
 
-  currentView      = 'page';
   currentPageIndex = index;
-
-  // Restore desktop arrows (may have been hidden by grid view)
-  prevBtn.style.display = '';
-  nextBtn.style.display = '';
-
-  // Remove grid-wide layout class
-  mainEl.classList.remove('main--grid');
-
-  // Update gallery button state
-  galleryBtn.classList.remove('header-btn--active');
-
-  // Update hash if it doesn't already match
-  const expectedHash = `#page/${page.id}`;
-  if (window.location.hash !== expectedHash) {
-    setHash(`page/${page.id}`);
-  }
+  gifPaused = false;
 
   // Build questions HTML
   const questionsHTML = page.questions.map((q, i) => `
@@ -106,15 +275,22 @@ function renderPage(index) {
     </div>
   `).join('');
 
-  // Full page HTML
+  // Pause/play SVG icons
+  const pauseIconSVG = '<svg width="24" height="24" viewBox="0 0 24 24" fill="white">' +
+    '<rect x="6" y="4" width="4" height="16" rx="1"></rect>' +
+    '<rect x="14" y="4" width="4" height="16" rx="1"></rect></svg>';
+  const playIconSVG = '<svg width="24" height="24" viewBox="0 0 24 24" fill="white">' +
+    '<polygon points="7,4 21,12 7,20"></polygon></svg>';
+
+  // Assemble full page HTML
   mainEl.innerHTML = `
-    <!-- Page header with number + title -->
+    <!-- Page header: number + title -->
     <div class="page-header">
       <span class="page-number">#${page.id}</span>
       <h2 class="page-title">${escapeHTML(page.title)}</h2>
     </div>
 
-    <!-- GIF with loading shimmer -->
+    <!-- GIF with loading shimmer + pause/play overlay -->
     <div class="gif-container" id="gifContainer">
       <div class="shimmer" id="gifShimmer">
         <span class="shimmer-icon">🎞️</span>
@@ -123,7 +299,15 @@ function renderPage(index) {
         src="${page.gifUrl}"
         alt="GIF: ${escapeHTML(page.title)}"
         id="gifImage"
+        crossorigin="anonymous"
       >
+      <canvas id="gifCanvas" class="gif-canvas"></canvas>
+      <div class="gif-overlay" id="gifOverlay">
+        <div class="gif-overlay-icon" id="gifOverlayIcon">
+          <span class="icon-pause">${pauseIconSVG}</span>
+          <span class="icon-play" style="display:none">${playIconSVG}</span>
+        </div>
+      </div>
     </div>
 
     <!-- Mobile navigation (shown below GIF on small screens) -->
@@ -149,218 +333,25 @@ function renderPage(index) {
       ${questionsHTML}
     </div>
 
-    <!-- Pagination -->
-    ${buildPaginationHTML(index)}
+    <!-- Pagination at the bottom -->
+    <div class="pagination" id="pagination"></div>
   `;
 
   // ---- Post-render setup ----
   setupGifLoading();
+  setupGifPausePlay();
   setupAnswerButtons();
   setupToggleAll();
   setupMobileNav();
   updateDesktopArrows();
-  setupPagination();
-
-  // Update sidebar highlight if it's open
-  if (sidebarOpen) {
-    populateSidebarList(sidebarSearch.value);
-  }
+  renderPagePagination();
 
   // Scroll to top when navigating to a new page
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 // ============================================================
-//  GRID / GALLERY VIEW
-// ============================================================
-
-/**
- * Render the gallery grid showing all pages as thumbnail cards.
- * Uses Intersection Observer for lazy-loading GIF thumbnails.
- */
-function renderGrid() {
-  currentView = 'grid';
-
-  // Update hash
-  if (window.location.hash !== '#grid') {
-    setHash('grid');
-  }
-
-  // Hide desktop nav arrows in grid view
-  prevBtn.style.display = 'none';
-  nextBtn.style.display = 'none';
-
-  // Widen the main container for the grid
-  mainEl.classList.add('main--grid');
-
-  // Mark gallery button as active
-  galleryBtn.classList.add('header-btn--active');
-
-  const cardsHTML = pages.map(page => `
-    <a class="grid-card" href="#page/${page.id}">
-      <div class="grid-card-thumb">
-        <img
-          class="grid-card-img"
-          data-src="${page.gifUrl}"
-          alt="GIF: ${escapeHTML(page.title)}"
-        >
-        <div class="grid-card-shimmer">
-          <span class="shimmer-icon">🎞️</span>
-        </div>
-      </div>
-      <div class="grid-card-info">
-        <span class="grid-card-num">#${page.id}</span>
-        <span class="grid-card-title">${escapeHTML(page.title)}</span>
-      </div>
-    </a>
-  `).join('');
-
-  mainEl.innerHTML = `
-    <div class="grid-header">
-      <h2 class="grid-heading">All GIFs</h2>
-      <span class="grid-count">${pages.length} pages</span>
-    </div>
-    <div class="grid-container" id="gridContainer">
-      ${cardsHTML}
-    </div>
-  `;
-
-  setupGridLazyLoading();
-
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-}
-
-/**
- * Set up Intersection Observer to lazy-load GIF thumbnails
- * as they scroll into view. Only visible cards load their GIF.
- */
-function setupGridLazyLoading() {
-  const container = document.getElementById('gridContainer');
-  if (!container) return;
-
-  const images = container.querySelectorAll('.grid-card-img');
-
-  // Fallback for very old browsers without IntersectionObserver
-  if (!('IntersectionObserver' in window)) {
-    images.forEach(img => { img.src = img.dataset.src; });
-    return;
-  }
-
-  const observer = new IntersectionObserver((entries) => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting) {
-        const img = entry.target;
-        img.src = img.dataset.src;
-
-        img.addEventListener('load', () => {
-          const shimmer = img.parentElement.querySelector('.grid-card-shimmer');
-          if (shimmer) shimmer.classList.add('hidden');
-        });
-        img.addEventListener('error', () => {
-          const shimmer = img.parentElement.querySelector('.grid-card-shimmer');
-          if (shimmer) shimmer.classList.add('hidden');
-        });
-
-        observer.unobserve(img);
-      }
-    });
-  }, {
-    rootMargin: '200px 0px',  // pre-load 200px before visible
-    threshold: 0.01
-  });
-
-  images.forEach(img => observer.observe(img));
-}
-
-// ============================================================
-//  PAGINATION — smart ellipsis page numbers
-// ============================================================
-
-/**
- * Generate an array of page numbers and '...' markers.
- * Always shows first page, last page, and ±delta pages around current.
- * Example: [1, '...', 5, 6, 7, 8, 9, '...', 50]
- *
- * @param {number} current - 1-based current page number
- * @param {number} total   - total number of pages
- * @param {number} delta   - pages to show on each side of current
- */
-function buildPaginationRange(current, total, delta) {
-  delta = delta || 2;
-  const range = [];
-  const left  = Math.max(2, current - delta);
-  const right = Math.min(total - 1, current + delta);
-
-  range.push(1);
-
-  if (left > 2) range.push('...');
-
-  for (let i = left; i <= right; i++) {
-    range.push(i);
-  }
-
-  if (right < total - 1) range.push('...');
-
-  if (total > 1) range.push(total);
-
-  return range;
-}
-
-/**
- * Build the pagination nav HTML for the given page index.
- */
-function buildPaginationHTML(currentIndex) {
-  const total = pages.length;
-  if (total <= 1) return '';
-
-  const current = currentIndex + 1; // convert 0-based to 1-based
-  const items   = buildPaginationRange(current, total, 2);
-
-  let html = '<nav class="pagination" aria-label="Page navigation">';
-
-  // Previous arrow
-  html += `<button class="pagination-btn pagination-arrow" data-page="${current - 1}"
-           ${current === 1 ? 'disabled' : ''} aria-label="Previous page">&larr;</button>`;
-
-  // Page numbers and ellipses
-  items.forEach(item => {
-    if (item === '...') {
-      html += '<span class="pagination-ellipsis">&hellip;</span>';
-    } else {
-      const isActive = item === current;
-      html += `<button class="pagination-btn ${isActive ? 'pagination-btn--active' : ''}"
-               data-page="${item}" ${isActive ? 'aria-current="page"' : ''}>${item}</button>`;
-    }
-  });
-
-  // Next arrow
-  html += `<button class="pagination-btn pagination-arrow" data-page="${current + 1}"
-           ${current === total ? 'disabled' : ''} aria-label="Next page">&rarr;</button>`;
-
-  html += '</nav>';
-  return html;
-}
-
-/**
- * Attach click handler to pagination buttons (event delegation).
- */
-function setupPagination() {
-  const pagination = mainEl.querySelector('.pagination');
-  if (!pagination) return;
-
-  pagination.addEventListener('click', (e) => {
-    const btn = e.target.closest('.pagination-btn');
-    if (!btn || btn.disabled) return;
-
-    const pageNum = parseInt(btn.dataset.page, 10);
-    if (isNaN(pageNum)) return;
-
-    renderPage(pageNum - 1); // convert 1-based to 0-based
-  });
-}
-
-// ============================================================
-//  GIF LOADING
+//  GIF LOADING (shimmer → loaded)
 // ============================================================
 
 function setupGifLoading() {
@@ -375,14 +366,124 @@ function setupGifLoading() {
     return;
   }
 
-  img.addEventListener('load', () => {
+  img.addEventListener('load', function onLoad() {
     shimmer.classList.add('hidden');
+    img.removeEventListener('load', onLoad);
   });
 
-  // On error, still hide shimmer so the broken-image icon shows
-  img.addEventListener('error', () => {
-    shimmer.classList.add('hidden');
+  img.addEventListener('error', function onError() {
+    /*
+     * If crossorigin="anonymous" caused the load to fail (server
+     * doesn't send CORS headers), retry without it. The GIF will
+     * load normally. Pause/play via canvas drawImage still works
+     * for display — it only taints the canvas, which we never read.
+     */
+    if (img.hasAttribute('crossorigin')) {
+      img.removeAttribute('crossorigin');
+      const src = img.getAttribute('src');
+      img.removeAttribute('src');
+      // Small delay ensures the browser treats this as a new request
+      requestAnimationFrame(() => { img.src = src; });
+    } else {
+      // Image genuinely broken — hide shimmer so user sees alt text
+      shimmer.classList.add('hidden');
+    }
+    img.removeEventListener('error', onError);
   });
+}
+
+// ============================================================
+//  GIF PAUSE / PLAY (canvas-based)
+// ============================================================
+
+/**
+ * Set up click handler on the GIF container to pause/play.
+ * Clicking draws the current animation frame to a <canvas>,
+ * freezing it. Clicking again resumes the animated <img>.
+ */
+function setupGifPausePlay() {
+  const container = document.getElementById('gifContainer');
+  if (!container) return;
+
+  container.addEventListener('click', (e) => {
+    // Don't pause if clicking the shimmer (still loading)
+    if (e.target.closest('.shimmer:not(.hidden)')) return;
+    toggleGifPause();
+  });
+}
+
+function toggleGifPause() {
+  const img     = document.getElementById('gifImage');
+  const canvas  = document.getElementById('gifCanvas');
+  const container = document.getElementById('gifContainer');
+
+  if (!img || !canvas || !container) return;
+  if (!img.complete || img.naturalWidth === 0) return; // not loaded yet
+
+  if (gifPaused) {
+    // ---- RESUME ----
+    canvas.style.display = 'none';
+    img.style.visibility = 'visible';
+    gifPaused = false;
+  } else {
+    // ---- PAUSE: capture current frame to canvas ----
+    try {
+      const ctx = canvas.getContext('2d');
+      canvas.width  = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      ctx.drawImage(img, 0, 0);
+      canvas.style.display = 'block';
+      img.style.visibility = 'hidden';  // hidden, not display:none → keeps layout
+      gifPaused = true;
+    } catch (err) {
+      /*
+       * drawImage can technically fail in very rare edge cases.
+       * Show a brief toast message and don't crash.
+       */
+      console.warn('GIF pause not available:', err);
+      showPauseUnavailable();
+      return;
+    }
+  }
+
+  updatePausePlayIcon();
+}
+
+/**
+ * Toggle the play/pause icon SVG and container CSS class.
+ */
+function updatePausePlayIcon() {
+  const container = document.getElementById('gifContainer');
+  const pauseIcon = container?.querySelector('.icon-pause');
+  const playIcon  = container?.querySelector('.icon-play');
+
+  if (!pauseIcon || !playIcon) return;
+
+  if (gifPaused) {
+    pauseIcon.style.display = 'none';
+    playIcon.style.display  = 'inline';
+    container.classList.add('paused');
+  } else {
+    pauseIcon.style.display = 'inline';
+    playIcon.style.display  = 'none';
+    container.classList.remove('paused');
+  }
+}
+
+/**
+ * Flash a "pause not available" toast on the GIF container.
+ */
+function showPauseUnavailable() {
+  const container = document.getElementById('gifContainer');
+  if (!container) return;
+
+  const msg = document.createElement('div');
+  msg.className = 'pause-unavailable';
+  msg.textContent = 'Pause not available for this GIF';
+  container.appendChild(msg);
+
+  // Remove after animation completes
+  setTimeout(() => msg.remove(), 2400);
 }
 
 // ============================================================
@@ -423,6 +524,7 @@ function setupToggleAll() {
     const allOpen  = [...wrappers].every(w => w.classList.contains('open'));
 
     if (allOpen) {
+      // Hide all
       wrappers.forEach(w => w.classList.remove('open'));
       buttons.forEach(b => {
         b.textContent = 'Show Answer';
@@ -430,6 +532,7 @@ function setupToggleAll() {
       });
       toggleBtn.textContent = 'Show All Answers';
     } else {
+      // Show all
       wrappers.forEach(w => w.classList.add('open'));
       buttons.forEach(b => {
         b.textContent = 'Hide Answer';
@@ -455,114 +558,14 @@ function syncToggleAllLabel() {
 }
 
 // ============================================================
-//  SIDEBAR MENU
-// ============================================================
-
-function openSidebar() {
-  sidebarOpen = true;
-  sidebar.classList.add('open');
-  sidebarBackdrop.classList.add('visible');
-  sidebar.setAttribute('aria-hidden', 'false');
-  document.body.style.overflow = 'hidden';
-
-  sidebarSearch.value = '';
-  populateSidebarList('');
-  sidebarSearch.focus();
-
-  // Scroll the active item into view
-  requestAnimationFrame(() => {
-    const activeItem = sidebarList.querySelector('.sidebar-item--active');
-    if (activeItem) {
-      activeItem.scrollIntoView({ block: 'center', behavior: 'instant' });
-    }
-  });
-}
-
-function closeSidebar() {
-  sidebarOpen = false;
-  sidebar.classList.remove('open');
-  sidebarBackdrop.classList.remove('visible');
-  sidebar.setAttribute('aria-hidden', 'true');
-  document.body.style.overflow = '';
-}
-
-/**
- * Populate the sidebar page list, filtered by a search string.
- * Matches against page title and page number.
- */
-function populateSidebarList(filter) {
-  const lowerFilter = filter.toLowerCase().trim();
-
-  const filtered = pages
-    .map((p, idx) => ({ page: p, index: idx }))
-    .filter(item => {
-      if (!lowerFilter) return true;
-      return (
-        item.page.title.toLowerCase().includes(lowerFilter) ||
-        String(item.page.id).includes(lowerFilter)
-      );
-    });
-
-  if (filtered.length === 0) {
-    sidebarList.innerHTML = '<p class="sidebar-empty">No pages found.</p>';
-    return;
-  }
-
-  sidebarList.innerHTML = filtered.map(item => {
-    const isActive = currentView === 'page' && item.index === currentPageIndex;
-    return `
-      <button class="sidebar-item ${isActive ? 'sidebar-item--active' : ''}"
-              data-index="${item.index}">
-        <span class="sidebar-item-num">#${item.page.id}</span>
-        <span class="sidebar-item-title">${escapeHTML(item.page.title)}</span>
-      </button>
-    `;
-  }).join('');
-}
-
-// Sidebar event listeners (set up once)
-menuBtn.addEventListener('click', () => {
-  sidebarOpen ? closeSidebar() : openSidebar();
-});
-
-sidebarBackdrop.addEventListener('click', closeSidebar);
-sidebarClose.addEventListener('click', closeSidebar);
-
-sidebarSearch.addEventListener('input', (e) => {
-  populateSidebarList(e.target.value);
-});
-
-// Event delegation for sidebar page items
-sidebarList.addEventListener('click', (e) => {
-  const item = e.target.closest('.sidebar-item');
-  if (!item) return;
-
-  const index = parseInt(item.dataset.index, 10);
-  closeSidebar();
-  renderPage(index);
-});
-
-// ============================================================
-//  GALLERY BUTTON
-// ============================================================
-
-galleryBtn.addEventListener('click', () => {
-  if (currentView === 'grid') {
-    renderPage(currentPageIndex);
-  } else {
-    renderGrid();
-  }
-});
-
-// ============================================================
-//  NAVIGATION
+//  NAVIGATION (next / prev)
 // ============================================================
 
 /** Go to the previous page (if possible). */
 function goPrev() {
   if (currentView !== 'page') return;
   if (currentPageIndex > 0) {
-    renderPage(currentPageIndex - 1);
+    navigateToPage(currentPageIndex - 1);
   }
 }
 
@@ -570,7 +573,7 @@ function goPrev() {
 function goNext() {
   if (currentView !== 'page') return;
   if (currentPageIndex < pages.length - 1) {
-    renderPage(currentPageIndex + 1);
+    navigateToPage(currentPageIndex + 1);
   }
 }
 
@@ -589,22 +592,34 @@ function updateDesktopArrows() {
   nextBtn.disabled = (currentPageIndex === pages.length - 1);
 }
 
+/** Hide desktop arrows (used in grid view). */
+function hideNavArrows() {
+  prevBtn.style.display = 'none';
+  nextBtn.style.display = 'none';
+}
+
+/** Show desktop arrows (revert to CSS default — media query handles visibility). */
+function showNavArrows() {
+  prevBtn.style.display = '';
+  nextBtn.style.display = '';
+}
+
 // Desktop arrow click handlers (set up once)
 prevBtn.addEventListener('click', goPrev);
 nextBtn.addEventListener('click', goNext);
 
-// Keyboard navigation (Left / Right arrow keys + ESC for sidebar)
+// Keyboard navigation
 document.addEventListener('keydown', (e) => {
-  // ESC closes sidebar
+  // Don't hijack arrows if user is typing in an input/textarea
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+  // Escape closes sidebar
   if (e.key === 'Escape' && sidebarOpen) {
     closeSidebar();
     return;
   }
 
-  // Don't hijack arrows if user is typing in an input/textarea
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-
-  // No arrow nav in grid view
+  // Arrow keys only work in page view
   if (currentView !== 'page') return;
 
   if (e.key === 'ArrowLeft')  goPrev();
@@ -612,25 +627,257 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ============================================================
+//  GALLERY TOGGLE
+// ============================================================
+
+galleryBtn.addEventListener('click', () => {
+  if (currentView === 'grid') {
+    // Return to the last-viewed page
+    navigateToPage(currentPageIndex);
+  } else {
+    // Open the gallery
+    navigateToGrid(1);
+  }
+});
+
+// ============================================================
+//  PAGINATION — Smart Ellipsis
+// ============================================================
+
+/**
+ * Generate the array of page numbers (and '...' markers) to display.
+ * Always shows first and last page, plus a window of ±2 around current.
+ *
+ * Example with 50 pages, current=25:
+ *   [1, '...', 23, 24, 25, 26, 27, '...', 50]
+ */
+function getPaginationRange(current, total) {
+  // If few enough pages, just show them all
+  if (total <= 7) {
+    return Array.from({ length: total }, (_, i) => i + 1);
+  }
+
+  const delta = 2;  // pages to show on each side of current
+  const range = [];
+  const left  = Math.max(2, current - delta);
+  const right = Math.min(total - 1, current + delta);
+
+  // Always include page 1
+  range.push(1);
+
+  // Ellipsis after page 1 if there's a gap
+  if (left > 2) range.push('...');
+
+  // Window around current page
+  for (let i = left; i <= right; i++) {
+    range.push(i);
+  }
+
+  // Ellipsis before last page if there's a gap
+  if (right < total - 1) range.push('...');
+
+  // Always include last page
+  if (total > 1) range.push(total);
+
+  return range;
+}
+
+/**
+ * Build pagination HTML and attach click handlers.
+ * Used by both the page view and the grid view.
+ *
+ * @param {HTMLElement} container  - the .pagination div
+ * @param {number}      current   - 1-based current page number
+ * @param {number}      total     - total number of pages
+ * @param {function}    onNavigate - called with 1-based page number
+ */
+function buildPagination(container, current, total, onNavigate) {
+  if (!container || total <= 1) return;
+
+  const range = getPaginationRange(current, total);
+
+  // Left arrow SVG (reused from nav arrows)
+  const leftArrow = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>';
+  const rightArrow = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"></polyline></svg>';
+
+  let html = '';
+
+  // Previous arrow
+  html += '<button class="pagination-btn" data-pag="' + (current - 1) + '"' +
+    (current === 1 ? ' disabled' : '') + '>' + leftArrow + '</button>';
+
+  // Page numbers and ellipses
+  range.forEach(item => {
+    if (item === '...') {
+      html += '<span class="pagination-ellipsis">…</span>';
+    } else {
+      html += '<button class="pagination-btn' +
+        (item === current ? ' active' : '') +
+        '" data-pag="' + item + '">' + item + '</button>';
+    }
+  });
+
+  // Next arrow
+  html += '<button class="pagination-btn" data-pag="' + (current + 1) + '"' +
+    (current === total ? ' disabled' : '') + '>' + rightArrow + '</button>';
+
+  container.innerHTML = html;
+
+  // Attach click handlers
+  container.querySelectorAll('.pagination-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.disabled) return;
+      const num = parseInt(btn.dataset.pag, 10);
+      if (num >= 1 && num <= total) {
+        onNavigate(num);
+      }
+    });
+  });
+}
+
+/**
+ * Render pagination for the page view (at the bottom of the page).
+ */
+function renderPagePagination() {
+  const container = document.getElementById('pagination');
+  const current   = currentPageIndex + 1;  // 1-based
+  const total     = pages.length;
+
+  buildPagination(container, current, total, (pageNum) => {
+    navigateToPage(pageNum - 1);  // convert to 0-based index
+  });
+}
+
+// ============================================================
+//  GRID / GALLERY VIEW
+// ============================================================
+
+/**
+ * Render the gallery grid for a given grid page number (1-based).
+ */
+function renderGrid(gridPage) {
+  const totalGridPages = Math.max(1, Math.ceil(pages.length / GRID_PAGE_SIZE));
+  gridPage = Math.min(Math.max(1, gridPage), totalGridPages);
+  currentGridPage = gridPage;
+
+  const startIdx = (gridPage - 1) * GRID_PAGE_SIZE;
+  const endIdx   = Math.min(startIdx + GRID_PAGE_SIZE, pages.length);
+  const slice    = pages.slice(startIdx, endIdx);
+
+  // Build card HTML
+  const cardsHTML = slice.map((page, i) => {
+    const globalIndex = startIdx + i;
+    return `
+      <div class="grid-card" data-page-index="${globalIndex}">
+        <div class="grid-card-gif">
+          <img
+            class="grid-card-img"
+            data-src="${page.gifUrl}"
+            alt="GIF: ${escapeHTML(page.title)}"
+          >
+          <div class="grid-card-shimmer">🎞️</div>
+        </div>
+        <div class="grid-card-info">
+          <span class="grid-card-number">#${page.id}</span>
+          <span class="grid-card-title">${escapeHTML(page.title)}</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  mainEl.innerHTML = `
+    <div class="grid-header">
+      <h2 class="grid-title">📚 All Pages</h2>
+      <p class="grid-subtitle">
+        ${pages.length} page${pages.length !== 1 ? 's' : ''} total
+        ${totalGridPages > 1 ? ' · Grid page ' + gridPage + ' of ' + totalGridPages : ''}
+      </p>
+    </div>
+
+    <div class="grid-container" id="gridContainer">
+      ${cardsHTML}
+    </div>
+
+    <div class="pagination" id="gridPagination"></div>
+  `;
+
+  // Card click → navigate to that page
+  mainEl.querySelectorAll('.grid-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const idx = parseInt(card.dataset.pageIndex, 10);
+      navigateToPage(idx);
+    });
+  });
+
+  // Lazy-load GIF thumbnails with IntersectionObserver
+  setupGridLazyLoading();
+
+  // Grid pagination
+  const paginationEl = document.getElementById('gridPagination');
+  buildPagination(paginationEl, gridPage, totalGridPages, (gp) => {
+    navigateToGrid(gp);
+  });
+
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+/**
+ * Use IntersectionObserver to lazy-load GIF thumbnails.
+ * Only starts loading the image when the card scrolls near the viewport.
+ */
+function setupGridLazyLoading() {
+  const images = mainEl.querySelectorAll('.grid-card-img');
+
+  // If IntersectionObserver isn't available, load all immediately
+  if (!('IntersectionObserver' in window)) {
+    images.forEach(img => loadGridImage(img));
+    return;
+  }
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        loadGridImage(entry.target);
+        observer.unobserve(entry.target);
+      }
+    });
+  }, {
+    rootMargin: '300px',  // start loading 300px before visible
+    threshold: 0
+  });
+
+  images.forEach(img => observer.observe(img));
+}
+
+/**
+ * Load a single grid thumbnail image from its data-src attribute.
+ */
+function loadGridImage(img) {
+  const src = img.dataset.src;
+  if (!src) return;
+
+  img.addEventListener('load', () => {
+    img.classList.add('loaded');
+    const shimmer = img.parentElement?.querySelector('.grid-card-shimmer');
+    if (shimmer) shimmer.style.display = 'none';
+  });
+
+  img.addEventListener('error', () => {
+    const shimmer = img.parentElement?.querySelector('.grid-card-shimmer');
+    if (shimmer) shimmer.textContent = '❌';
+  });
+
+  img.src = src;
+  img.removeAttribute('data-src');
+}
+
+// ============================================================
 //  HASH CHANGE LISTENER
-//  Handles browser back/forward buttons
+//  Routes all navigation (back/forward, link clicks, etc.)
 // ============================================================
 
 window.addEventListener('hashchange', () => {
-  // Close sidebar on any navigation
-  if (sidebarOpen) closeSidebar();
-
-  const route = parseHash();
-
-  if (route.view === 'grid') {
-    if (currentView !== 'grid') {
-      renderGrid();
-    }
-  } else {
-    if (currentView !== 'page' || route.index !== currentPageIndex) {
-      renderPage(route.index);
-    }
-  }
+  route();
 });
 
 // ============================================================
@@ -649,14 +896,84 @@ function escapeHTML(str) {
 }
 
 // ============================================================
-//  BOOT — render the initial view on load
+//  DARK MODE
+// ============================================================
+
+/**
+ * Initialize dark mode based on:
+ *   1. localStorage preference (if user previously toggled)
+ *   2. System preference via prefers-color-scheme
+ * Updates the <html> data-theme attribute and the toggle icon.
+ */
+function initDarkMode() {
+  const saved = localStorage.getItem('theme');
+
+  if (saved === 'dark' || saved === 'light') {
+    // Use saved preference
+    setTheme(saved);
+  } else {
+    // No saved preference — follow system setting
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    setTheme(prefersDark ? 'dark' : 'light');
+  }
+
+  // Listen for system theme changes (only applies if no manual override)
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+    if (!localStorage.getItem('theme')) {
+      setTheme(e.matches ? 'dark' : 'light');
+    }
+  });
+}
+
+/**
+ * Apply a theme ('dark' or 'light') to the document.
+ */
+function setTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  updateDarkModeIcon(theme);
+}
+
+/**
+ * Toggle between dark and light mode.
+ * Saves the preference to localStorage so it persists.
+ */
+function toggleDarkMode() {
+  const current = document.documentElement.getAttribute('data-theme');
+  const next = current === 'dark' ? 'light' : 'dark';
+
+  setTheme(next);
+  localStorage.setItem('theme', next);
+}
+
+/**
+ * Update the dark mode button icon — 🌙 for light mode, ☀️ for dark mode.
+ */
+function updateDarkModeIcon(theme) {
+  const icon = darkModeBtn?.querySelector('.dark-mode-icon');
+  if (icon) {
+    icon.textContent = theme === 'dark' ? '☀️' : '🌙';
+  }
+}
+
+// Dark mode button click handler
+darkModeBtn.addEventListener('click', toggleDarkMode);
+
+// ============================================================
+//  BOOT — initialize the app on load
 // ============================================================
 
 (function init() {
-  const route = parseHash();
-  if (route.view === 'grid') {
-    renderGrid();
-  } else {
-    renderPage(route.index);
+  // Initialize dark mode before rendering (prevents flash)
+  initDarkMode();
+
+  // Populate sidebar with all pages
+  populateSidebar();
+
+  // Set default hash if none is present
+  if (!window.location.hash) {
+    history.replaceState(null, '', '#page/1');
   }
+
+  // Render the correct view based on the current hash
+  route();
 })();
